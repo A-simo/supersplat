@@ -1,14 +1,16 @@
 import {
     ADDRESS_CLAMP_TO_EDGE,
     FILTER_NEAREST,
-    PIXELFORMAT_L8,
+    PIXELFORMAT_R32F,
     Asset,
     BoundingBox,
     Entity,
     GSplatData,
     GSplatResource,
     Texture,
-    Vec3
+    Vec3,
+    GraphicsDevice,
+    PIXELFORMAT_L8
 } from 'playcanvas';
 import { Element, ElementType } from "./element";
 import { Serializer } from "./serializer";
@@ -19,6 +21,9 @@ const vertexShader = /*glsl*/`
 uniform sampler2D splatState;
 
 flat varying highp uint vertexState;
+
+flat varying highp uint splatIndex;
+varying vec3 splatCenter;
 
 #ifdef PICK_PASS
 flat varying highp uint vertexId;
@@ -36,22 +41,39 @@ void main(void)
 
     vertexState = uint(texelFetch(splatState, splatUV, 0).r * 255.0);
 
+    splatIndex = splatId;
+    splatCenter = centerLocal;
+
     #ifdef PICK_PASS
         vertexId = splatId;
     #endif
 }
 `;
 
-const fragmentShader = /*glsl*/`
+const getFragmentShader = (numSplats: number) => /*glsl*/`
 
 #ifdef PICK_PASS
 flat varying highp uint vertexId;
 #endif
 
 flat varying highp uint vertexState;
+flat varying highp uint splatIndex;
+varying vec3 splatCenter;
 
 uniform float pickerAlpha;
 uniform float ringSize;
+uniform vec3 view_position;
+
+uniform sampler2D fRest0texture;
+uniform sampler2D fRest1texture;
+uniform sampler2D fRest2texture;
+uniform sampler2D fRest3texture;
+uniform sampler2D fRest4texture;
+uniform sampler2D fRest5texture;
+uniform sampler2D fRest6texture;
+uniform sampler2D fRest7texture;
+uniform sampler2D fRest8texture;
+
 float PI = 3.14159;
 
 void main(void)
@@ -105,8 +127,29 @@ void main(void)
                 }
             }
         } 
+        float SH_C1 = 0.94886025119029199;
 
-        gl_FragColor = vec4(c, alpha);
+        // Spherical Harmonics Coefficients
+        float sh_r_y_coeff = texture2D(fRest0texture, vec2(float(splatIndex) / float(${numSplats}), 0.0)).r;
+        float sh_g_y_coeff = texture2D(fRest1texture, vec2(float(splatIndex) / float(${numSplats}), 0.0)).r;
+        float sh_b_y_coeff = texture2D(fRest2texture, vec2(float(splatIndex) / float(${numSplats}), 0.0)).r;
+
+        float sh_r_z_coeff = texture2D(fRest3texture, vec2(float(splatIndex) / float(${numSplats}), 0.0)).r;
+        float sh_g_z_coeff = texture2D(fRest4texture, vec2(float(splatIndex) / float(${numSplats}), 0.0)).r;
+        float sh_b_z_coeff = texture2D(fRest5texture, vec2(float(splatIndex) / float(${numSplats}), 0.0)).r;
+
+        float sh_r_x_coeff = texture2D(fRest6texture, vec2(float(splatIndex) / float(${numSplats}), 0.0)).r;
+        float sh_g_x_coeff = texture2D(fRest7texture, vec2(float(splatIndex) / float(${numSplats}), 0.0)).r;
+        float sh_b_x_coeff = texture2D(fRest8texture, vec2(float(splatIndex) / float(${numSplats}), 0.0)).r;
+        
+        vec3 normalized_direction = normalize(splatCenter - view_position);
+
+        vec3 shFirstOrderCorrection = 
+        - SH_C1 * normalized_direction.y * vec3(sh_r_y_coeff, sh_g_y_coeff, sh_b_y_coeff)
+        + SH_C1 * normalized_direction.z * vec3(sh_r_z_coeff, sh_g_z_coeff, sh_b_z_coeff)
+        - SH_C1 * normalized_direction.x * vec3(sh_r_x_coeff, sh_g_x_coeff, sh_b_x_coeff);
+
+        gl_FragColor = vec4(c + shFirstOrderCorrection, alpha);
     #endif
 }
 `;
@@ -125,13 +168,14 @@ class Splat extends Element {
         super(ElementType.splat);
 
         const splatResource = asset.resource as GSplatResource;
+        const numSplats = splatResource.splatData.numSplats;
 
         this.asset = asset;
         this.splatData = splatResource.splatData;
         this.entity = new Entity('splatRoot');
         this.root = splatResource.instantiate({
             vertex: vertexShader,
-            fragment: fragmentShader
+            fragment: getFragmentShader(numSplats)
         });
 
         // create the state texture
@@ -148,12 +192,67 @@ class Splat extends Element {
         });
         splatResource.device.scope.resolve('splatState').setValue(this.stateTexture);
 
+        // Get 1 order Spherical Harmonics splatData 
+        const fRest0 = splatResource.splatData.getProp("f_rest_0");
+        const fRest1 = splatResource.splatData.getProp("f_rest_1");
+        const fRest2 = splatResource.splatData.getProp("f_rest_2");
+        const fRest3 = splatResource.splatData.getProp("f_rest_3");
+        const fRest4 = splatResource.splatData.getProp("f_rest_4");
+        const fRest5 = splatResource.splatData.getProp("f_rest_5");
+        const fRest6 = splatResource.splatData.getProp("f_rest_6");
+        const fRest7 = splatResource.splatData.getProp("f_rest_7");
+        const fRest8 = splatResource.splatData.getProp("f_rest_8");
+
+        // Wrap Spherical Harmonics data with texture
+        const fRest0texture = this.createTextureFromData(splatResource.device, fRest0, numSplats, 1);
+        const fRest1texture = this.createTextureFromData(splatResource.device, fRest1, numSplats, 1);
+        const fRest2texture = this.createTextureFromData(splatResource.device, fRest2, numSplats, 1);
+        const fRest3texture = this.createTextureFromData(splatResource.device, fRest3, numSplats, 1);
+        const fRest4texture = this.createTextureFromData(splatResource.device, fRest4, numSplats, 1);
+        const fRest5texture = this.createTextureFromData(splatResource.device, fRest5, numSplats, 1);
+        const fRest6texture = this.createTextureFromData(splatResource.device, fRest6, numSplats, 1);
+        const fRest7texture = this.createTextureFromData(splatResource.device, fRest7, numSplats, 1);
+        const fRest8texture = this.createTextureFromData(splatResource.device, fRest8, numSplats, 1);
+        
+        // Assign Spherical Harmonics Textures for passing to shaders
+        splatResource.device.scope.resolve('fRest0texture').setValue(fRest0texture);
+        splatResource.device.scope.resolve('fRest1texture').setValue(fRest1texture);
+        splatResource.device.scope.resolve('fRest2texture').setValue(fRest2texture);
+        splatResource.device.scope.resolve('fRest3texture').setValue(fRest3texture);
+        splatResource.device.scope.resolve('fRest4texture').setValue(fRest4texture);
+        splatResource.device.scope.resolve('fRest5texture').setValue(fRest5texture);
+        splatResource.device.scope.resolve('fRest6texture').setValue(fRest6texture);
+        splatResource.device.scope.resolve('fRest7texture').setValue(fRest7texture);
+        splatResource.device.scope.resolve('fRest8texture').setValue(fRest8texture);
+
+        console.log({maxTextureSize: splatResource.device.maxTextureSize});
+        
+
         // when sort changes, re-render the scene
         this.root.gsplat.instance.sorter.on('updated', () => {
             this.changedCounter++;
         });
 
         this.entity.addChild(this.root);
+    }
+
+    createTextureFromData(device: GraphicsDevice, data: Float32Array, width: number, height: number) {
+        const texture = new Texture(device, {
+            width: width,
+            height: height,
+            format: PIXELFORMAT_R32F,
+            mipmaps: false,
+            minFilter: FILTER_NEAREST,
+            magFilter: FILTER_NEAREST,
+            addressU: ADDRESS_CLAMP_TO_EDGE,
+            addressV: ADDRESS_CLAMP_TO_EDGE
+        });
+
+        const textureData = new Float32Array(data);
+        texture.lock().set(textureData);
+        texture.unlock();
+
+        return texture;
     }
 
     destroy() {
